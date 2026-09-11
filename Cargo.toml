@@ -27,7 +27,7 @@ bitcoin = { version = "0.32", features = ["rand-std"] }
 bip324 = "0.11"
 
 # Async runtime, TCP, timers, channels.
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
 
 # CLI flags.
 clap = { version = "4", features = ["derive"] }

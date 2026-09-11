@@ -102,6 +102,35 @@ pub enum Network {
     Regtest,
 }
 
+impl Network {
+    /// The corresponding rust-bitcoin network.
+    pub fn to_bitcoin(self) -> bitcoin::Network {
+        match self {
+            Network::Mainnet => bitcoin::Network::Bitcoin,
+            Network::Testnet3 => bitcoin::Network::Testnet,
+            Network::Testnet4 => bitcoin::Network::Testnet4,
+            Network::Signet => bitcoin::Network::Signet,
+            Network::Regtest => bitcoin::Network::Regtest,
+        }
+    }
+
+    /// The 4-byte P2P network magic.
+    pub fn magic(self) -> bitcoin::p2p::Magic {
+        bitcoin::p2p::Magic::from(self.to_bitcoin())
+    }
+
+    /// The conventional default P2P port for the network.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Network::Mainnet => 8333,
+            Network::Testnet3 => 18333,
+            Network::Testnet4 => 48333,
+            Network::Signet => 38333,
+            Network::Regtest => 18444,
+        }
+    }
+}
+
 /// Transport preference (PLAN.md §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Transport {
