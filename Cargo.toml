@@ -1,0 +1,55 @@
+[package]
+name = "cli-ent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "CLI Extended Node Talker: an interactive Bitcoin P2P client for one peer over v1/v2 transport"
+license = "MIT"
+readme = "README.md"
+default-run = "cli-ent"
+
+[lib]
+name = "cli_ent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cli-ent"
+path = "src/main.rs"
+
+[dependencies]
+# Bitcoin P2P types: NetworkMessage, RawNetworkMessage, VersionMessage, Inventory,
+# ServiceFlags, Magic, BIP152 types, consensus Encodable/Decodable, genesis_block.
+# Pinned to released 0.32 (P2P types live under `bitcoin::p2p`). See TODO recon.
+bitcoin = { version = "0.32", features = ["rand-std"] }
+
+# BIP324 handshake state machine + packet cipher. Sans-IO layer only — do NOT
+# enable the `tokio` feature (its wrapper hides the ciphertext, killing corrupt/hold).
+bip324 = "0.11"
+
+# Async runtime, TCP, timers, channels.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+
+# CLI flags.
+clap = { version = "4", features = ["derive"] }
+
+# REPL line editing, tab completion, ExternalPrinter.
+rustyline = "18"
+
+# Nonces.
+rand = "0.8"
+
+# Parse durations like `500ms`, `2s`.
+humantime = "2"
+
+# Errors.
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# Spawn a regtest bitcoind + RPC assertions for integration tests.
+# corepc-node's default config does not open a P2P port — enable it explicitly.
+corepc-node = { version = "0.12", features = ["download"] }
+corepc-client = "0.16"
+
+[profile.release]
+debug = 1
