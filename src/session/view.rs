@@ -102,4 +102,16 @@ impl SessionView {
     pub fn last(&self) -> Option<&RingEntry> {
         self.ring.back()
     }
+
+    /// Clear peer state and stats for a fresh connection. The ring buffer is kept
+    /// (its sequence numbers continue across reconnects, per PLAN §3).
+    pub fn reset_connection(&mut self) {
+        self.peer = PeerState::default();
+        self.stats = SessionStats::default();
+    }
+
+    /// Whether a peer is currently connected.
+    pub fn is_connected(&self) -> bool {
+        self.peer.addr.is_some()
+    }
 }

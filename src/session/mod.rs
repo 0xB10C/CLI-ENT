@@ -1,9 +1,11 @@
 //! The session task (PLAN.md §3, §6).
 //!
-//! Owns the socket halves and runs a `select!` loop over incoming messages and
-//! REPL/script commands. It drives the handshake, keeps [`SessionView`] current,
-//! and emits [`Event`]s. Milestone 1 covers connect, the profile-driven
-//! handshake, sending, and clean teardown with stats.
+//! A long-lived actor: it starts disconnected, and processes commands. While
+//! disconnected it waits for `Connect`; while connected it runs a `select!` loop
+//! over incoming messages and commands, driving the handshake, keeping
+//! [`SessionView`] current, and emitting [`Event`]s. `Disconnect` returns it to
+//! the idle state (the task stays alive); `Quit` ends it. Sequence numbers
+//! continue across reconnects (PLAN.md §3).
 
 pub mod automations;
 pub mod events;
@@ -14,113 +16,206 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::Magic;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::cli::Transport as TransportPref;
 use crate::net::connect::connect;
+use crate::net::resolve::resolve;
 use crate::net::transport::{FrameError, Reader, TransportKind, Wire, Writer};
 
 use self::events::{Command, DisconnectReason, Direction, Event, HandshakeState};
 use self::handshake::Handshaker;
 use self::view::SessionView;
 
-/// The running session: transport halves, shared view, channels, and handshake state.
-pub struct Session {
+/// Immutable connection parameters shared across (re)connects.
+pub struct SessionConfig {
+    pub default_port: u16,
+    pub magic: Magic,
+    pub default_transport: TransportPref,
+    pub timeout: Duration,
+    pub handshaker: Handshaker,
+}
+
+/// Per-connection state, held locally while connected so it does not alias the
+/// actor's other fields during `select!`.
+struct ConnState {
     reader: Reader,
     writer: Writer,
-    view: Arc<Mutex<SessionView>>,
-    events: UnboundedSender<Event>,
-    commands: UnboundedReceiver<Command>,
-    handshaker: Handshaker,
     hs: HandshakeState,
     addr: SocketAddr,
-    seq: u64,
     ready_emitted: bool,
 }
 
+/// How a connected phase ended.
+enum ConnOutcome {
+    /// Back to idle; the task keeps running.
+    Disconnected(DisconnectReason),
+    /// End the whole task.
+    Quit(DisconnectReason),
+}
+
+/// The session actor.
+pub struct Session {
+    config: SessionConfig,
+    view: Arc<Mutex<SessionView>>,
+    events: UnboundedSender<Event>,
+    commands: UnboundedReceiver<Command>,
+    seq: u64,
+}
+
 impl Session {
-    /// Connect to the peer and prepare the session (no messages sent yet).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn connect(
-        peer_spec: String,
-        addr: SocketAddr,
-        pref: TransportPref,
-        magic: Magic,
-        connect_timeout: Duration,
-        handshaker: Handshaker,
+    pub fn new(
+        config: SessionConfig,
         view: Arc<Mutex<SessionView>>,
         events: UnboundedSender<Event>,
         commands: UnboundedReceiver<Command>,
-    ) -> Result<Self> {
-        // Milestone 1 uses v1; emit the kind we will actually connect with.
-        let _ = events.send(Event::Connecting {
+    ) -> Self {
+        Self {
+            config,
+            view,
+            events,
+            commands,
+            seq: 1,
+        }
+    }
+
+    /// Run until `Quit` (or all command senders drop). Consumes `self`.
+    pub async fn run(mut self) {
+        loop {
+            // Idle phase: only a command can move us forward.
+            match self.commands.recv().await {
+                None | Some(Command::Quit) => break,
+                Some(Command::Connect { addr, transport }) => {
+                    match self.establish(&addr, transport).await {
+                        Ok(mut conn) => {
+                            self.after_connect(&mut conn).await;
+                            match self.run_connected(&mut conn).await {
+                                ConnOutcome::Disconnected(reason) => {
+                                    self.teardown(&mut conn, reason).await;
+                                }
+                                ConnOutcome::Quit(reason) => {
+                                    self.teardown(&mut conn, reason).await;
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = self.events.send(Event::Error(e.to_string()));
+                        }
+                    }
+                }
+                Some(Command::Disconnect) => {
+                    let _ = self
+                        .events
+                        .send(Event::Error("not connected".to_string()));
+                }
+                Some(Command::Send(_)) | Some(Command::SendRaw(_)) => {
+                    let _ = self
+                        .events
+                        .send(Event::Error("not connected".to_string()));
+                }
+            }
+        }
+    }
+
+    /// Resolve, connect, and set up view/events. Returns the fresh connection.
+    async fn establish(
+        &mut self,
+        spec: &str,
+        transport: Option<TransportPref>,
+    ) -> anyhow::Result<ConnState> {
+        let pref = transport.unwrap_or(self.config.default_transport);
+        let addr = resolve(spec, self.config.default_port)?;
+
+        let _ = self.events.send(Event::Connecting {
             addr,
             transport: TransportKind::V1,
         });
 
-        let conn = connect(addr, pref, magic, connect_timeout).await?;
+        let conn = connect(addr, pref, self.config.magic, self.config.timeout).await?;
 
         {
-            let mut v = view.lock().unwrap();
+            let mut v = self.view.lock().unwrap();
+            v.reset_connection();
             v.peer.addr = Some(addr);
             v.peer.transport = Some(conn.kind);
-            v.peer.resolved_from = (peer_spec != addr.to_string()).then_some(peer_spec);
+            v.peer.resolved_from = (spec != addr.to_string()).then(|| spec.to_string());
             v.stats.connected_at = Some(Instant::now());
         }
 
-        let _ = events.send(Event::Connected {
+        let _ = self.events.send(Event::Connected {
             addr,
             transport: conn.kind,
         });
 
-        Ok(Self {
+        Ok(ConnState {
             reader: conn.reader,
             writer: conn.writer,
-            view,
-            events,
-            commands,
-            handshaker,
             hs: HandshakeState::default(),
             addr,
-            seq: 1,
             ready_emitted: false,
         })
     }
 
-    /// Run the session until disconnect. Consumes `self`.
-    pub async fn run(mut self) {
-        // Profile's on-connect sends (core/minimal: version; manual: nothing).
-        for msg in self.handshaker.on_connect(self.addr) {
-            self.send(msg, None).await;
+    /// Send the profile's on-connect messages.
+    async fn after_connect(&mut self, conn: &mut ConnState) {
+        for msg in self.config.handshaker.on_connect(conn.addr) {
+            self.send(conn, msg, None).await;
         }
+    }
 
-        let reason = loop {
+    /// The connected select loop.
+    async fn run_connected(&mut self, conn: &mut ConnState) -> ConnOutcome {
+        loop {
             tokio::select! {
-                incoming = self.reader.read_message() => {
+                incoming = conn.reader.read_message() => {
                     match incoming {
-                        Ok(wire) => self.handle_recv(wire).await,
-                        Err(FrameError::Eof) => break DisconnectReason::PeerClosed,
-                        Err(FrameError::Reset) => break DisconnectReason::PeerReset,
-                        Err(e) => break DisconnectReason::FrameError(e.to_string()),
+                        Ok(wire) => self.handle_recv(conn, wire).await,
+                        Err(FrameError::Eof) => {
+                            return ConnOutcome::Disconnected(DisconnectReason::PeerClosed)
+                        }
+                        Err(FrameError::Reset) => {
+                            return ConnOutcome::Disconnected(DisconnectReason::PeerReset)
+                        }
+                        Err(e) => {
+                            return ConnOutcome::Disconnected(DisconnectReason::FrameError(
+                                e.to_string(),
+                            ))
+                        }
                     }
                 }
                 cmd = self.commands.recv() => {
                     match cmd {
-                        Some(Command::Send(msg)) => self.send(msg, None).await,
-                        Some(Command::SendRaw(bytes)) => self.send_raw(bytes, None).await,
-                        Some(Command::Disconnect) | Some(Command::Quit) | None => {
-                            break DisconnectReason::UserRequested
+                        Some(Command::Send(msg)) => self.send(conn, msg, None).await,
+                        Some(Command::SendRaw(bytes)) => self.send_raw(conn, bytes, None).await,
+                        Some(Command::Connect { .. }) => {
+                            let _ = self.events.send(Event::Error(
+                                "already connected; disconnect first".to_string(),
+                            ));
+                        }
+                        Some(Command::Disconnect) => {
+                            return ConnOutcome::Disconnected(DisconnectReason::UserRequested)
+                        }
+                        Some(Command::Quit) | None => {
+                            return ConnOutcome::Quit(DisconnectReason::UserRequested)
                         }
                     }
                 }
             }
-        };
+        }
+    }
 
-        let _ = self.writer.close().await;
-        let stats = self.view.lock().unwrap().stats.clone();
+    /// Close the socket, emit final stats, and mark the view disconnected.
+    async fn teardown(&mut self, conn: &mut ConnState, reason: DisconnectReason) {
+        let _ = conn.writer.close().await;
+        let stats = {
+            let mut v = self.view.lock().unwrap();
+            let stats = v.stats.clone();
+            v.reset_connection();
+            stats
+        };
         let _ = self.events.send(Event::Disconnected { reason, stats });
     }
 
@@ -130,19 +225,17 @@ impl Session {
         s
     }
 
-    /// Encode, write, record, and emit a message. `tag` labels automatic or
-    /// misbehaving sends (e.g. `auto: pong`).
-    async fn send(&mut self, msg: NetworkMessage, tag: Option<String>) {
-        let (bytes, wire) = self.writer.encode(&msg);
-        if let Err(e) = self.writer.write_bytes(&bytes).await {
+    /// Encode, write, record, and emit a message.
+    async fn send(&mut self, conn: &mut ConnState, msg: NetworkMessage, tag: Option<String>) {
+        let (bytes, wire) = conn.writer.encode(&msg);
+        if let Err(e) = conn.writer.write_bytes(&bytes).await {
             let _ = self.events.send(Event::Error(format!("write failed: {e}")));
             return;
         }
 
-        // Handshake flags follow the message actually sent.
         match &msg {
-            NetworkMessage::Version(_) => self.hs.version_sent = true,
-            NetworkMessage::Verack => self.hs.verack_sent = true,
+            NetworkMessage::Version(_) => conn.hs.version_sent = true,
+            NetworkMessage::Verack => conn.hs.verack_sent = true,
             _ => {}
         }
 
@@ -150,17 +243,16 @@ impl Session {
         let at = Instant::now();
         self.view.lock().unwrap().record(seq, Direction::Sent, &wire, at);
         let _ = self.events.send(Event::Sent { seq, wire, at, tag });
-        self.sync_handshake();
+        self.sync_handshake(conn);
     }
 
-    /// Send pre-framed bytes verbatim (misbehaviour / raw path). The parsed
-    /// message is unknown, so it is recorded with `msg = None`.
-    async fn send_raw(&mut self, bytes: Vec<u8>, tag: Option<String>) {
-        if let Err(e) = self.writer.write_bytes(&bytes).await {
+    /// Send pre-framed bytes verbatim (raw / misbehaviour path).
+    async fn send_raw(&mut self, conn: &mut ConnState, bytes: Vec<u8>, tag: Option<String>) {
+        if let Err(e) = conn.writer.write_bytes(&bytes).await {
             let _ = self.events.send(Event::Error(format!("write failed: {e}")));
             return;
         }
-        let wire = crate::net::transport::Wire {
+        let wire = Wire {
             msg: None,
             frame: crate::net::v1::frame_kind(&bytes),
             raw: bytes,
@@ -172,25 +264,24 @@ impl Session {
         let _ = self.events.send(Event::Sent { seq, wire, at, tag });
     }
 
-    /// Handle one received message: record it, react per the profile, warn on
-    /// decode failure, and update handshake state.
-    async fn handle_recv(&mut self, wire: Wire) {
+    /// Handle one received message: record, react per the profile, warn on decode
+    /// failure, and update handshake state.
+    async fn handle_recv(&mut self, conn: &mut ConnState, wire: Wire) {
         let seq = self.next_seq();
         let at = Instant::now();
         self.view.lock().unwrap().record(seq, Direction::Recv, &wire, at);
 
-        // Decide our reaction and update state before moving `wire` into the event.
         let mut responses = Vec::new();
         if let Some(msg) = &wire.msg {
             match msg {
                 NetworkMessage::Version(v) => {
-                    self.hs.version_received = true;
+                    conn.hs.version_received = true;
                     self.view.lock().unwrap().peer.peer_version = Some(v.clone());
-                    responses = self.handshaker.on_peer_version(v);
+                    responses = self.config.handshaker.on_peer_version(v);
                 }
                 NetworkMessage::Verack => {
-                    self.hs.verack_received = true;
-                    responses = self.handshaker.on_peer_verack();
+                    conn.hs.verack_received = true;
+                    responses = self.config.handshaker.on_peer_verack();
                 }
                 _ => {}
             }
@@ -208,16 +299,16 @@ impl Session {
         }
 
         for msg in responses {
-            self.send(msg, None).await;
+            self.send(conn, msg, None).await;
         }
-        self.sync_handshake();
+        self.sync_handshake(conn);
     }
 
-    /// Mirror handshake flags into the view and emit `Ready` once.
-    fn sync_handshake(&mut self) {
-        self.view.lock().unwrap().peer.handshake = self.hs;
-        if self.hs.is_ready() && !self.ready_emitted {
-            self.ready_emitted = true;
+    /// Mirror handshake flags into the view and emit `Ready` once per connection.
+    fn sync_handshake(&mut self, conn: &mut ConnState) {
+        self.view.lock().unwrap().peer.handshake = conn.hs;
+        if conn.hs.is_ready() && !conn.ready_emitted {
+            conn.ready_emitted = true;
             let _ = self.events.send(Event::Ready);
         }
     }

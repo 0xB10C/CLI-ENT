@@ -14,11 +14,17 @@ use crate::net::transport::{TransportKind, Wire};
 /// A request from the REPL/script to the session task.
 #[derive(Debug)]
 pub enum Command {
+    /// Connect to a peer (raw spec; the session resolves it). `transport` of
+    /// `None` uses the session's default preference.
+    Connect {
+        addr: String,
+        transport: Option<crate::cli::Transport>,
+    },
     /// Send a fully-formed message (framed/encrypted by the transport).
     Send(NetworkMessage),
     /// Send pre-framed (v1) or pre-encrypted (v2) bytes as-is.
     SendRaw(Vec<u8>),
-    /// Close the connection but keep the process alive.
+    /// Close the connection but keep the session task alive.
     Disconnect,
     /// Close the connection and end the session task.
     Quit,
