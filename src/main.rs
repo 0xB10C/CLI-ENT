@@ -37,6 +37,10 @@ fn main() -> Result<()> {
         None => args.network.magic(),
     };
     let timeout = parse_duration(&args.timeout).context("parsing --timeout")?;
+    let verack_delay = match &args.verack_delay {
+        Some(d) => Some(parse_duration(d).context("parsing --verack-delay")?),
+        None => None,
+    };
     let handshaker = build_handshaker(&args)?;
     let color = use_color(args.no_color);
 
@@ -45,6 +49,7 @@ fn main() -> Result<()> {
         magic,
         default_transport: args.transport,
         timeout,
+        verack_delay,
         handshaker,
     };
 

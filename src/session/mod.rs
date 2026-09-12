@@ -35,6 +35,9 @@ pub struct SessionConfig {
     pub magic: Magic,
     pub default_transport: TransportPref,
     pub timeout: Duration,
+    /// Delay applied only to the verack we send (PLAN §6). Other post-version
+    /// sends go out immediately.
+    pub verack_delay: Option<Duration>,
     pub handshaker: Handshaker,
 }
 
@@ -46,6 +49,8 @@ struct ConnState {
     hs: HandshakeState,
     addr: SocketAddr,
     ready_emitted: bool,
+    /// A pending delayed verack (armed by `--verack-delay`).
+    pending_verack: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 /// How a connected phase ended.
@@ -169,6 +174,7 @@ impl Session {
             hs: HandshakeState::default(),
             addr,
             ready_emitted: false,
+            pending_verack: None,
         })
     }
 
@@ -183,6 +189,10 @@ impl Session {
     async fn run_connected(&mut self, conn: &mut ConnState) -> ConnOutcome {
         loop {
             tokio::select! {
+                _ = tick(&mut conn.pending_verack) => {
+                    conn.pending_verack = None;
+                    self.send(conn, NetworkMessage::Verack, Some("verack: delayed".into())).await;
+                }
                 incoming = conn.reader.read_message() => {
                     match incoming {
                         Ok(wire) => self.handle_recv(conn, wire).await,
@@ -312,10 +322,19 @@ impl Session {
         }
 
         for msg in responses {
+            // --verack-delay: hold back only the verack; send everything else now.
+            if matches!(msg, NetworkMessage::Verack) {
+                if let Some(delay) = self.config.verack_delay {
+                    conn.pending_verack = Some(Box::pin(tokio::time::sleep(delay)));
+                    continue;
+                }
+            }
             self.send(conn, msg, None).await;
         }
         self.sync_handshake(conn);
     }
+
+    // (helper `tick` lives at module scope, below.)
 
     /// Mirror handshake flags into the view and emit `Ready` once per connection.
     fn sync_handshake(&mut self, conn: &mut ConnState) {
@@ -324,5 +343,13 @@ impl Session {
             conn.ready_emitted = true;
             let _ = self.events.send(Event::Ready);
         }
+    }
+}
+
+/// Await a pending delayed-verack timer, or never resolve when none is armed.
+async fn tick(pending: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>) {
+    match pending {
+        Some(sleep) => sleep.as_mut().await,
+        None => std::future::pending().await,
     }
 }
