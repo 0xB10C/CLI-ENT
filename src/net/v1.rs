@@ -149,6 +149,16 @@ pub fn payload_bytes(magic: Magic, msg: &NetworkMessage) -> Vec<u8> {
     bytes[HEADER_LEN..].to_vec()
 }
 
+/// The wire command and payload for a message. Reads the command from the
+/// serialized frame header, so it is correct even for `Unknown` (whose `cmd()`
+/// returns the literal "unknown"). Used by the v2 encoder.
+pub fn command_and_payload(magic: Magic, msg: &NetworkMessage) -> (String, Vec<u8>) {
+    let raw = RawNetworkMessage::new(magic, msg.clone());
+    let bytes = consensus::serialize(&raw);
+    let command = parse_command(&bytes[4..16]);
+    (command, bytes[HEADER_LEN..].to_vec())
+}
+
 /// Build a canonical v1 frame (with the correct checksum) from a command and
 /// payload, then decode it into a `NetworkMessage`. Returns the parsed message or
 /// the decode error. Shared by the v1 reader and the v2 short-ID decoder.

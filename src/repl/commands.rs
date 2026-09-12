@@ -7,7 +7,8 @@
 
 use std::str::FromStr;
 
-use bitcoin::p2p::message::NetworkMessage;
+use bitcoin::hex::FromHex;
+use bitcoin::p2p::message::{CommandString, NetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::{BlockHash, Txid, Wtxid};
@@ -132,10 +133,61 @@ fn parse_send(args: &[&str]) -> Action {
     let Some((name, fields)) = args.split_first() else {
         return Action::Usage("usage: send <message> [field=value ...]".to_string());
     };
+
+    // `send raw <command> <hex>`: an arbitrary command + payload.
+    if *name == "raw" {
+        return parse_send_raw(fields);
+    }
+
+    // `send <name> hex:<payload>`: any variant, payload as hex.
+    if let Some(first) = fields.first() {
+        if let Some(hex) = first.strip_prefix("hex:") {
+            return match build_from_hex(name, hex) {
+                Ok(msg) => Action::ToSession(Command::Send(msg)),
+                Err(e) => Action::Usage(e),
+            };
+        }
+    }
+
     match build_message(name, fields) {
         Ok(msg) => Action::ToSession(Command::Send(msg)),
         Err(usage) => Action::Usage(usage),
     }
+}
+
+/// `send <name> hex:<payload>`: synthesize a v1 frame for `<name>` with the given
+/// payload and decode it into a typed `NetworkMessage` (covers every variant;
+/// unknown commands decode into `Unknown`).
+fn build_from_hex(name: &str, hex: &str) -> Result<NetworkMessage, String> {
+    let payload = Vec::<u8>::from_hex(hex).map_err(|_| format!("invalid hex payload {hex:?}"))?;
+    // The magic is irrelevant to decoding; use mainnet's.
+    match crate::net::v1::decode_payload(bitcoin::p2p::Magic::BITCOIN, name, &payload) {
+        (Some(msg), _) => Ok(msg),
+        (None, Some(e)) => Err(format!("cannot decode {name} payload: {e}")),
+        (None, None) => Err(format!("cannot decode {name} payload")),
+    }
+}
+
+/// `send raw <command> <hex>`: send an arbitrary 12-byte command with a hex
+/// payload as `Unknown` (the transport frames/encrypts it normally).
+fn parse_send_raw(fields: &[&str]) -> Action {
+    let usage = || "usage: send raw <command> <hex>".to_string();
+    let (cmd, rest) = match fields.split_first() {
+        Some(x) => x,
+        None => return Action::Usage(usage()),
+    };
+    let payload = match rest.first() {
+        Some(h) => match Vec::<u8>::from_hex(h) {
+            Ok(p) => p,
+            Err(_) => return Action::Usage(format!("invalid hex payload {h:?}")),
+        },
+        None => Vec::new(),
+    };
+    let command = match CommandString::try_from(cmd.to_string()) {
+        Ok(c) => c,
+        Err(_) => return Action::Usage(format!("invalid command {cmd:?} (max 12 ascii bytes)")),
+    };
+    Action::ToSession(Command::Send(NetworkMessage::Unknown { command, payload }))
 }
 
 /// Build a `NetworkMessage` from a message name and field tokens.
@@ -345,5 +397,33 @@ mod tests {
     #[test]
     fn unknown_message_is_usage() {
         assert!(matches!(parse("send frobnicate"), Action::Usage(_)));
+    }
+
+    #[test]
+    fn hex_path_decodes_ping() {
+        // ping payload is an 8-byte LE nonce.
+        match parse("send ping hex:2a00000000000000") {
+            Action::ToSession(Command::Send(NetworkMessage::Ping(n))) => assert_eq!(n, 42),
+            _ => panic!("expected ping from hex"),
+        }
+    }
+
+    #[test]
+    fn hex_path_decodes_verack_empty() {
+        assert!(matches!(
+            parse("send verack hex:"),
+            Action::ToSession(Command::Send(NetworkMessage::Verack))
+        ));
+    }
+
+    #[test]
+    fn send_raw_builds_unknown() {
+        match parse("send raw foobar deadbeef") {
+            Action::ToSession(Command::Send(NetworkMessage::Unknown { command, payload })) => {
+                assert_eq!(command.to_string(), "foobar");
+                assert_eq!(payload, vec![0xde, 0xad, 0xbe, 0xef]);
+            }
+            _ => panic!("expected unknown"),
+        }
     }
 }

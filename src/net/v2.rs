@@ -207,8 +207,8 @@ impl V2Writer {
     /// `Wire` whose `raw` is the plaintext content (captured before encryption).
     /// Advances the outbound cipher, so only call when the bytes will be sent.
     pub fn encode(&mut self, msg: &NetworkMessage) -> (Vec<u8>, Wire) {
-        let command = msg.cmd().to_string();
-        let payload = super::v1::payload_bytes(self.magic, msg);
+        // Read the true command from the serialized frame (correct for Unknown).
+        let (command, payload) = super::v1::command_and_payload(self.magic, msg);
         let content = encode_content(&command, &payload);
         let wire_bytes = self
             .cipher
