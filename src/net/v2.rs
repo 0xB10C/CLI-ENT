@@ -226,6 +226,26 @@ impl V2Writer {
         (wire_bytes, wire)
     }
 
+    /// Encrypt an arbitrary command + payload as a v2 packet (bypasses the
+    /// rust-bitcoin encoder, for the misbehaviour/craft paths). Advances the cipher.
+    pub fn encode_raw(&mut self, command: &str, payload: &[u8]) -> (Vec<u8>, Wire) {
+        let content = encode_content(command, payload);
+        let wire_bytes = self
+            .cipher
+            .encrypt_to_vec(&content, PacketType::Genuine, None);
+        let wire = Wire {
+            msg: None,
+            frame: FrameKind::V2 {
+                cipher_len: wire_bytes.len(),
+                decoy: false,
+                short_id: short_id(command),
+            },
+            raw: content,
+            decode_error: None,
+        };
+        (wire_bytes, wire)
+    }
+
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.inner.write_all(bytes).await?;
         self.inner.flush().await

@@ -29,6 +29,43 @@ pub enum Command {
         kind: crate::session::automations::AutoKind,
         on: bool,
     },
+    /// Send a hand-built command + payload (craft / oversize / unknown-cmd).
+    Craft {
+        command: String,
+        payload: Vec<u8>,
+        tag: String,
+    },
+    /// Encode a message, then mangle the encoded bytes (bad-checksum/magic/…).
+    Mangle {
+        msg: NetworkMessage,
+        kind: crate::misbehave::MangleKind,
+    },
+    /// Send a message padded to `bytes` (oversize; the command frames it).
+    Oversize {
+        msg: NetworkMessage,
+        bytes: usize,
+    },
+    /// Start a cancellable repeating send of a message.
+    Spam {
+        msg: NetworkMessage,
+        rate: Option<u32>,
+        count: Option<u64>,
+    },
+    /// Stop a running spam.
+    StopSpam,
+    /// Encode a message, send all but the last `keep` bytes, hold the remainder.
+    /// `drip` releases the remainder in chunks (slowloris).
+    Hold {
+        msg: NetworkMessage,
+        keep: usize,
+        drip: Option<(usize, std::time::Duration)>,
+    },
+    /// Release the held bytes.
+    Release,
+    /// Discard the held bytes (a truncated message).
+    Drop,
+    /// Stop / resume reading from the peer (half-open testing).
+    PauseReads(bool),
     /// Close the connection but keep the session task alive.
     Disconnect,
     /// Close the connection and end the session task.
@@ -116,6 +153,11 @@ pub enum Event {
     },
     /// The handshake reached `Ready`.
     Ready,
+    /// A spam run finished.
+    SpamEnded {
+        sent: u64,
+        elapsed: std::time::Duration,
+    },
     Disconnected {
         reason: DisconnectReason,
         stats: crate::session::view::SessionStats,

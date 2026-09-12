@@ -54,6 +54,25 @@ struct ConnState {
     wtxidrelay: bool,
     /// A pending delayed verack (armed by `--verack-delay`).
     pending_verack: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    /// Bytes held back by `hold` (a partial message).
+    held: Option<Vec<u8>>,
+    /// Slowloris drip: `(chunk_size, interval)` releasing the held bytes.
+    drip: Option<(usize, Duration)>,
+    /// A running spam.
+    spam: Option<SpamState>,
+    /// When true, the select loop stops reading from the peer.
+    reads_paused: bool,
+}
+
+/// A running `spam`.
+struct SpamState {
+    msg: NetworkMessage,
+    /// Pause between sends; `None` sends as fast as `write` accepts.
+    interval: Option<Duration>,
+    /// Remaining sends for a bounded burst.
+    remaining: Option<u64>,
+    sent: u64,
+    started: Instant,
 }
 
 /// How a connected phase ended.
@@ -125,12 +144,8 @@ impl Session {
                     }
                 }
                 Some(Command::SetAuto { kind, on }) => self.set_auto(kind, on),
-                Some(Command::Disconnect) => {
-                    let _ = self
-                        .events
-                        .send(Event::Error("not connected".to_string()));
-                }
-                Some(Command::Send(_)) | Some(Command::SendRaw(_)) => {
+                // Everything else needs a connection.
+                Some(_) => {
                     let _ = self
                         .events
                         .send(Event::Error("not connected".to_string()));
@@ -190,6 +205,10 @@ impl Session {
             ready_emitted: false,
             wtxidrelay: false,
             pending_verack: None,
+            held: None,
+            drip: None,
+            spam: None,
+            reads_paused: false,
         })
     }
 
@@ -208,7 +227,13 @@ impl Session {
                     conn.pending_verack = None;
                     self.send(conn, NetworkMessage::Verack, Some("verack: delayed".into())).await;
                 }
-                incoming = conn.reader.read_message() => {
+                _ = spam_wait(&conn.spam) => {
+                    self.spam_step(conn).await;
+                }
+                _ = drip_wait(&conn.drip, conn.held.is_some()) => {
+                    self.drip_step(conn).await;
+                }
+                incoming = conn.reader.read_message(), if !conn.reads_paused => {
                     match incoming {
                         Ok(wire) => self.handle_recv(conn, wire).await,
                         Err(FrameError::Eof) => {
@@ -226,28 +251,227 @@ impl Session {
                 }
                 cmd = self.commands.recv() => {
                     match cmd {
-                        Some(Command::Send(msg)) => self.send(conn, msg, None).await,
-                        Some(Command::SendRaw(bytes)) => self.send_raw(conn, bytes, None).await,
-                        Some(Command::SetAuto { kind, on }) => self.set_auto(kind, on),
-                        Some(Command::Connect { .. }) => {
-                            let _ = self.events.send(Event::Error(
-                                "already connected; disconnect first".to_string(),
-                            ));
-                        }
                         Some(Command::Disconnect) => {
                             return ConnOutcome::Disconnected(DisconnectReason::UserRequested)
                         }
                         Some(Command::Quit) | None => {
                             return ConnOutcome::Quit(DisconnectReason::UserRequested)
                         }
+                        Some(other) => self.dispatch_command(conn, other).await,
                     }
                 }
             }
         }
     }
 
+    /// Handle a non-terminal command while connected.
+    async fn dispatch_command(&mut self, conn: &mut ConnState, cmd: Command) {
+        // Guard: while holding a partial message (and not dripping), an
+        // interleaved send would corrupt the v1 frame or desync the v2 cipher.
+        let interleaving = matches!(
+            cmd,
+            Command::Send(_)
+                | Command::SendRaw(_)
+                | Command::Craft { .. }
+                | Command::Mangle { .. }
+                | Command::Spam { .. }
+        );
+        if interleaving && conn.held.is_some() && conn.drip.is_none() {
+            let _ = self
+                .events
+                .send(Event::Error("holding a partial message; release or drop first".into()));
+            return;
+        }
+
+        match cmd {
+            Command::Send(msg) => self.send(conn, msg, None).await,
+            Command::SendRaw(bytes) => self.send_raw(conn, bytes, None).await,
+            Command::SetAuto { kind, on } => self.set_auto(kind, on),
+            Command::Craft { command, payload, tag } => {
+                let (bytes, wire) = conn.writer.encode_raw(&command, &payload);
+                self.write_and_record(conn, &bytes, wire, Some(tag)).await;
+            }
+            Command::Mangle { msg, kind } => self.mangle_send(conn, msg, kind).await,
+            Command::Oversize { msg, bytes } => {
+                let (command, payload) =
+                    crate::net::v1::command_and_payload(self.config.magic, &msg);
+                let padded = crate::misbehave::oversize_payload(&payload, bytes);
+                let (wire_bytes, wire) = conn.writer.encode_raw(&command, &padded);
+                let tag = format!("misbehave: oversize {bytes} bytes");
+                self.write_and_record(conn, &wire_bytes, wire, Some(tag)).await;
+            }
+            Command::Spam { msg, rate, count } => {
+                conn.spam = Some(SpamState {
+                    msg,
+                    interval: rate.filter(|r| *r > 0).map(|r| Duration::from_secs_f64(1.0 / r as f64)),
+                    remaining: count,
+                    sent: 0,
+                    started: Instant::now(),
+                });
+            }
+            Command::StopSpam => self.stop_spam(conn),
+            Command::Hold { msg, keep, drip } => self.hold(conn, msg, keep, drip).await,
+            Command::Release => self.release(conn).await,
+            Command::Drop => {
+                if conn.held.take().is_some() {
+                    conn.drip = None;
+                    let _ = self.events.send(Event::Error("held bytes dropped".into()));
+                }
+            }
+            Command::PauseReads(on) => {
+                conn.reads_paused = on;
+            }
+            Command::Connect { .. } => {
+                let _ = self
+                    .events
+                    .send(Event::Error("already connected; disconnect first".into()));
+            }
+            // Disconnect/Quit handled by the caller.
+            Command::Disconnect | Command::Quit => {}
+        }
+    }
+
+    /// Encode a message and mangle the encoded bytes, if the mangle applies to
+    /// this transport.
+    async fn mangle_send(&mut self, conn: &mut ConnState, msg: NetworkMessage, kind: crate::misbehave::MangleKind) {
+        let is_v2 = matches!(conn.writer.kind(), TransportKind::V2);
+        if !kind.applies_to(is_v2) {
+            let where_ = if is_v2 { "v2" } else { "v1" };
+            let _ = self
+                .events
+                .send(Event::Error(format!("{} — not applicable on {where_}", kind.label())));
+            return;
+        }
+        let (command, payload) = crate::net::v1::command_and_payload(self.config.magic, &msg);
+        let (bytes, _wire) = conn.writer.encode_raw(&command, &payload);
+        let mangled = crate::misbehave::mangle(&bytes, kind);
+        // Record the mangled bytes we actually put on the wire.
+        let wire = Wire {
+            msg: None,
+            frame: crate::net::v1::frame_kind(&mangled),
+            raw: mangled.clone(),
+            decode_error: None,
+        };
+        self.write_and_record(conn, &mangled, wire, Some(kind.label())).await;
+    }
+
+    /// Begin holding a partial message: send all but the last `keep` bytes.
+    async fn hold(
+        &mut self,
+        conn: &mut ConnState,
+        msg: NetworkMessage,
+        keep: usize,
+        drip: Option<(usize, Duration)>,
+    ) {
+        if conn.held.is_some() {
+            let _ = self.events.send(Event::Error("already holding; release or drop first".into()));
+            return;
+        }
+        let (bytes, _wire) = conn.writer.encode(&msg);
+        let keep = keep.min(bytes.len());
+        let split = bytes.len() - keep;
+        let (prefix, suffix) = bytes.split_at(split);
+        let tag = format!("misbehave: hold {}/{} bytes", keep, bytes.len());
+        let wire = Wire {
+            msg: None,
+            frame: crate::net::v1::frame_kind(prefix),
+            raw: prefix.to_vec(),
+            decode_error: None,
+        };
+        self.write_and_record(conn, prefix, wire, Some(tag)).await;
+        conn.held = Some(suffix.to_vec());
+        conn.drip = drip;
+    }
+
+    /// Release all held bytes at once.
+    async fn release(&mut self, conn: &mut ConnState) {
+        match conn.held.take() {
+            Some(bytes) => {
+                conn.drip = None;
+                let wire = Wire {
+                    msg: None,
+                    frame: crate::net::v1::frame_kind(&bytes),
+                    raw: bytes.clone(),
+                    decode_error: None,
+                };
+                self.write_and_record(conn, &bytes, wire, Some("misbehave: release".into()))
+                    .await;
+            }
+            None => {
+                let _ = self.events.send(Event::Error("nothing held".into()));
+            }
+        }
+    }
+
+    /// Release one drip chunk of the held bytes.
+    async fn drip_step(&mut self, conn: &mut ConnState) {
+        let Some((chunk, _)) = conn.drip else { return };
+        let Some(held) = conn.held.as_mut() else { return };
+        let n = chunk.min(held.len());
+        let piece: Vec<u8> = held.drain(..n).collect();
+        let done = held.is_empty();
+        if let Err(e) = conn.writer.write_bytes(&piece).await {
+            let _ = self.events.send(Event::Error(format!("drip write failed: {e}")));
+        }
+        if done {
+            conn.held = None;
+            conn.drip = None;
+            let _ = self.events.send(Event::Error("drip complete".into()));
+        }
+    }
+
+    /// Send one spam packet (re-encoding each time so the v2 cipher advances).
+    async fn spam_step(&mut self, conn: &mut ConnState) {
+        let msg = match &conn.spam {
+            Some(s) => s.msg.clone(),
+            None => return,
+        };
+        let (bytes, _wire) = conn.writer.encode(&msg);
+        if conn.writer.write_bytes(&bytes).await.is_err() {
+            self.stop_spam(conn);
+            return;
+        }
+        if let Some(s) = conn.spam.as_mut() {
+            s.sent += 1;
+            if let Some(r) = s.remaining.as_mut() {
+                *r -= 1;
+                if *r == 0 {
+                    self.stop_spam(conn);
+                }
+            }
+        }
+    }
+
+    fn stop_spam(&mut self, conn: &mut ConnState) {
+        if let Some(s) = conn.spam.take() {
+            let _ = self.events.send(Event::SpamEnded {
+                sent: s.sent,
+                elapsed: s.started.elapsed(),
+            });
+        }
+    }
+
+    /// Write raw bytes to the wire and record them in the ring/event stream.
+    async fn write_and_record(
+        &mut self,
+        conn: &mut ConnState,
+        bytes: &[u8],
+        wire: Wire,
+        tag: Option<String>,
+    ) {
+        if let Err(e) = conn.writer.write_bytes(bytes).await {
+            let _ = self.events.send(Event::Error(format!("write failed: {e}")));
+            return;
+        }
+        let seq = self.next_seq();
+        let at = Instant::now();
+        self.view.lock().unwrap().record(seq, Direction::Sent, &wire, at);
+        let _ = self.events.send(Event::Sent { seq, wire, at, tag });
+    }
+
     /// Close the socket, emit final stats, and mark the view disconnected.
     async fn teardown(&mut self, conn: &mut ConnState, reason: DisconnectReason) {
+        self.stop_spam(conn);
         let _ = conn.writer.close().await;
         let stats = {
             let mut v = self.view.lock().unwrap();
@@ -395,5 +619,25 @@ async fn tick(pending: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>) {
     match pending {
         Some(sleep) => sleep.as_mut().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Pace the next spam send: sleep for the interval, yield when unpaced, or never
+/// resolve when not spamming.
+async fn spam_wait(spam: &Option<SpamState>) {
+    match spam {
+        Some(s) => match s.interval {
+            Some(d) => tokio::time::sleep(d).await,
+            None => tokio::task::yield_now().await,
+        },
+        None => std::future::pending().await,
+    }
+}
+
+/// Pace the next drip chunk, or never resolve when not dripping.
+async fn drip_wait(drip: &Option<(usize, Duration)>, holding: bool) {
+    match (drip, holding) {
+        (Some((_, interval)), true) => tokio::time::sleep(*interval).await,
+        _ => std::future::pending().await,
     }
 }

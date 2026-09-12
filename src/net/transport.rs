@@ -149,6 +149,14 @@ impl Writer {
         }
     }
 
+    /// Frame/encrypt an arbitrary command + payload (misbehaviour/craft path).
+    pub fn encode_raw(&mut self, command: &str, payload: &[u8]) -> (Vec<u8>, Wire) {
+        match self {
+            Writer::V1(w) => w.encode_raw(command, payload),
+            Writer::V2(w) => w.encode_raw(command, payload),
+        }
+    }
+
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
             Writer::V1(w) => w.write_bytes(bytes).await,

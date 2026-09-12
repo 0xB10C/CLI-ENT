@@ -131,6 +131,19 @@ impl V1Writer {
         (bytes, wire)
     }
 
+    /// Frame an arbitrary command + payload into a v1 frame (bypasses the
+    /// rust-bitcoin encoder, for the misbehaviour/craft paths).
+    pub fn encode_raw(&self, command: &str, payload: &[u8]) -> (Vec<u8>, Wire) {
+        let bytes = build_frame(self.magic, command, payload);
+        let wire = Wire {
+            msg: None,
+            frame: frame_kind(&bytes),
+            raw: bytes.clone(),
+            decode_error: None,
+        };
+        (bytes, wire)
+    }
+
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.inner.write_all(bytes).await?;
         self.inner.flush().await
@@ -167,6 +180,16 @@ pub fn decode_payload(
     command: &str,
     payload: &[u8],
 ) -> (Option<NetworkMessage>, Option<String>) {
+    let frame = build_frame(magic, command, payload);
+    match consensus::deserialize::<RawNetworkMessage>(&frame) {
+        Ok(raw_msg) => (Some(raw_msg.into_payload()), None),
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
+/// Build a well-formed v1 frame (correct checksum) for a command and payload.
+/// Used by the decoder, the raw send path, and the misbehaviour builders.
+pub fn build_frame(magic: Magic, command: &str, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
     frame.extend_from_slice(&magic.to_bytes());
     let mut cmd = [0u8; 12];
@@ -177,11 +200,7 @@ pub fn decode_payload(
     frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     frame.extend_from_slice(&checksum(payload));
     frame.extend_from_slice(payload);
-
-    match consensus::deserialize::<RawNetworkMessage>(&frame) {
-        Ok(raw_msg) => (Some(raw_msg.into_payload()), None),
-        Err(e) => (None, Some(e.to_string())),
-    }
+    frame
 }
 
 /// Derive the frame metadata from a well-formed serialized v1 frame (used for

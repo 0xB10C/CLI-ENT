@@ -155,6 +155,14 @@ pub fn render_event(ev: &Event, t0: Instant, color: bool) -> Option<String> {
             "#{seq:<4}          ⚠ {command} payload decode failed: {error}"
         ))),
         Event::Ready => Some(st.bold("     ↪ handshake ready").into_owned()),
+        Event::SpamEnded { sent, elapsed } => {
+            let secs = elapsed.as_secs_f64();
+            let rate = if secs > 0.0 { *sent as f64 / secs } else { 0.0 };
+            Some(format!(
+                "     spam ended: {sent} sent in {secs:.1}s (≈{:.0}/s)",
+                rate
+            ))
+        }
         Event::Disconnected { reason, stats } => {
             let dur = stats
                 .connected_at
