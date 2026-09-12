@@ -254,7 +254,7 @@ fn handshake_str(hs: &HandshakeState) -> String {
     )
 }
 
-fn print_show(view: &Arc<Mutex<SessionView>>, printer: &Printer, target: ShowTarget, _hex: bool) {
+fn print_show(view: &Arc<Mutex<SessionView>>, printer: &Printer, target: ShowTarget, hex: bool) {
     let v = view.lock().unwrap();
     let entry = match target {
         ShowTarget::Last => v.last(),
@@ -265,20 +265,26 @@ fn print_show(view: &Arc<Mutex<SessionView>>, printer: &Printer, target: ShowTar
         return;
     };
 
-    let dir = match entry.dir {
-        crate::session::events::Direction::Sent => "→",
-        crate::session::events::Direction::Recv => "←",
-    };
-    printer.line(&format!(
-        "#{} {} {}   {} bytes",
-        entry.seq,
-        dir,
-        entry.wire.command(),
-        entry.wire.raw.len()
-    ));
-    // Milestone 2 shows the raw hex; the annotated view arrives in milestone 9.
-    for row in hexdump(&entry.wire.raw) {
-        printer.line(&row);
+    if hex {
+        let dir = match entry.dir {
+            crate::session::events::Direction::Sent => "→",
+            crate::session::events::Direction::Recv => "←",
+        };
+        printer.line(&format!(
+            "#{} {} {}   {} bytes",
+            entry.seq,
+            dir,
+            entry.wire.command(),
+            entry.wire.raw.len()
+        ));
+        for row in hexdump(&entry.wire.raw) {
+            printer.line(&row);
+        }
+    } else {
+        // Default: field-by-field annotation (PLAN §12).
+        for row in crate::messages::annotate::annotate(entry) {
+            printer.line(&row);
+        }
     }
 }
 
