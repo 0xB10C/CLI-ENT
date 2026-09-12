@@ -50,6 +50,18 @@ enum Flow {
     Quit,
 }
 
+/// Execute one command line (used by the script driver). Returns true if the line
+/// was `quit`.
+pub fn exec(
+    line: &str,
+    view: &Arc<Mutex<SessionView>>,
+    commands: &UnboundedSender<Command>,
+    printer: &Printer,
+    samples: &Arc<SampleData>,
+) -> bool {
+    matches!(dispatch(line, view, commands, printer, samples), Flow::Quit)
+}
+
 /// Parse and act on one input line, shared by the interactive and plain loops.
 fn dispatch(
     line: &str,

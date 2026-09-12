@@ -43,6 +43,12 @@ fn main() -> Result<()> {
         Some(d) => Some(parse_duration(d).context("parsing --verack-delay")?),
         None => None,
     };
+    let script_delay = match &args.script_delay {
+        Some(d) => Some(parse_duration(d).context("parsing --script-delay")?),
+        None => None,
+    };
+    // Under the manual profile the script starts as soon as the transport is up.
+    let wait_ready = !matches!(args.handshake, cli_ent::cli::Handshake::Manual);
     let handshaker = build_handshaker(&args)?;
     let color = use_color(args.no_color);
 
@@ -103,6 +109,21 @@ fn main() -> Result<()> {
         rt.spawn(event_loop(ev_rx, printer.clone(), color));
         initial_connect(&cmd_tx, &args);
 
+        if let Some(path) = &args.script {
+            let code = rt.block_on(cli_ent::script::run(
+                path,
+                script_delay,
+                wait_ready,
+                view.clone(),
+                cmd_tx.clone(),
+                printer.clone(),
+                samples.clone(),
+            ));
+            if args.exit_after_script {
+                rt.shutdown_timeout(Duration::from_millis(300));
+                std::process::exit(code);
+            }
+        }
         run_repl(view, cmd_tx, printer, samples, editor);
     } else {
         let printer = Printer::plain(log_file);
@@ -110,6 +131,22 @@ fn main() -> Result<()> {
         rt.spawn(session.run());
         rt.spawn(event_loop(ev_rx, printer.clone(), color));
         initial_connect(&cmd_tx, &args);
+
+        if let Some(path) = &args.script {
+            let code = rt.block_on(cli_ent::script::run(
+                path,
+                script_delay,
+                wait_ready,
+                view.clone(),
+                cmd_tx.clone(),
+                printer.clone(),
+                samples.clone(),
+            ));
+            if args.exit_after_script {
+                rt.shutdown_timeout(Duration::from_millis(300));
+                std::process::exit(code);
+            }
+        }
 
         let stdin = std::io::stdin();
         run_plain(stdin.lock(), view, cmd_tx, printer, samples);

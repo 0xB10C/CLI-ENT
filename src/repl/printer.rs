@@ -60,7 +60,8 @@ impl Printer {
             }
         }
         if let Some(f) = inner.file.as_mut() {
-            let _ = writeln!(f, "{}", strip_ansi(s));
+            let ts = humantime::format_rfc3339_millis(std::time::SystemTime::now());
+            let _ = writeln!(f, "{ts}  {}", strip_ansi(s));
         }
     }
 }
