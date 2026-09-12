@@ -222,6 +222,8 @@ checksum = "b65c2e1ab98050c93cc9ada070d5070e014329c65196d03f6f8f1f75c2666f37"
 dependencies = [
  "rustls",
  "rustls-webpki",
+ "serde",
+ "serde_json",
  "webpki-roots",
 ]
 
@@ -338,6 +340,7 @@ dependencies = [
  "humantime",
  "rand",
  "rustyline",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
@@ -365,7 +368,7 @@ checksum = "dc0d0096927a820ea80d4a43a2355209d9a69ef5b420861bf413c7e667cbff0b"
 dependencies = [
  "bitcoin",
  "corepc-types 0.12.0",
- "jsonrpc",
+ "jsonrpc 0.19.0",
  "log",
  "serde",
  "serde_json",
@@ -379,6 +382,7 @@ checksum = "349238a237f42ae84050dc449406a734a752c418b9dd531ecb4e93e7b97d094e"
 dependencies = [
  "bitcoin",
  "corepc-types 0.15.0",
+ "jsonrpc 0.20.1",
  "log",
  "serde",
  "serde_json",
@@ -580,6 +584,18 @@ checksum = "629d2b4ae586d04b6bae3c75879d7ddd39325c2b67a9c87634f4ec88a488dc65"
 dependencies = [
  "base64 0.22.1",
  "bitreq 0.2.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jsonrpc"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f106cca655869522988b976127096f0aa36e0f1a8ff1f1f425a5c85b61e59391"
+dependencies = [
+ "base64 0.22.1",
+ "bitreq 0.3.7",
  "serde",
  "serde_json",
 ]

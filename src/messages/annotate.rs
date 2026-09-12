@@ -248,3 +248,39 @@ fn render_span(raw: &[u8], span: &Span) -> String {
         span.start, hex, span.name, span.note
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::consensus::serialize;
+    use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+    use bitcoin::p2p::Magic;
+
+    fn ping_entry() -> RingEntry {
+        let msg = NetworkMessage::Ping(0x0102030405060708);
+        let frame = serialize(&RawNetworkMessage::new(Magic::BITCOIN, msg.clone()));
+        RingEntry {
+            seq: 7,
+            dir: Direction::Sent,
+            wire: Wire {
+                msg: Some(msg),
+                frame: crate::net::v1::frame_kind(&frame),
+                raw: frame,
+                decode_error: None,
+            },
+            at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn annotates_v1_ping_header_and_nonce() {
+        let lines = annotate(&ping_entry());
+        let joined = lines.join("\n");
+        assert!(joined.contains("magic"));
+        assert!(joined.contains("command"));
+        assert!(joined.contains("checksum"));
+        assert!(joined.contains("nonce"));
+        // Header line reports the frame size (24 header + 8 nonce).
+        assert!(lines[0].contains("32 bytes"));
+    }
+}

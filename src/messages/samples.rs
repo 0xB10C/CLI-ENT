@@ -38,6 +38,9 @@ pub struct SampleData {
     pub tx: Transaction,
     pub txid: Txid,
     pub wtxid: Wtxid,
+    /// Poison: block1 with its merkle root byte-flipped. The message is
+    /// well-formed; the node accepts it then rejects on the merkle check.
+    pub block_badmerkle: Block,
 }
 
 impl SampleData {
@@ -55,6 +58,17 @@ impl SampleData {
         let txid = tx.compute_txid();
         let wtxid = tx.compute_wtxid();
 
+        // Poison: flip a byte of block1's merkle root. Well-formed message,
+        // fails the node's merkle check.
+        let mut block_badmerkle = block1.clone();
+        {
+            use bitcoin::hashes::Hash;
+            let mut root = block_badmerkle.header.merkle_root.to_byte_array();
+            root[0] ^= 0x01;
+            block_badmerkle.header.merkle_root =
+                bitcoin::TxMerkleNode::from_byte_array(root);
+        }
+
         Self {
             network,
             genesis,
@@ -64,6 +78,7 @@ impl SampleData {
             tx,
             txid,
             wtxid,
+            block_badmerkle,
         }
     }
 

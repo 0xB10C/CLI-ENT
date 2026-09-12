@@ -49,7 +49,8 @@ thiserror = "2"
 # Spawn a regtest bitcoind + RPC assertions for integration tests.
 # corepc-node's default config does not open a P2P port — enable it explicitly.
 corepc-node = { version = "0.12", features = ["download"] }
-corepc-client = "0.16"
+corepc-client = { version = "0.16", features = ["client-sync"] }
+serde_json = "1"
 
 [profile.release]
 debug = 1

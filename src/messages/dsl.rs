@@ -169,13 +169,16 @@ fn build_block(fields: &[&str], samples: &SampleData) -> Result<M, String> {
     match fields.first() {
         Some(&"sample:genesis") => Ok(M::Block(samples.genesis.clone())),
         Some(&"sample:block1") => Ok(M::Block(samples.block1.clone())),
+        Some(&"sample:block-badmerkle") => Ok(M::Block(samples.block_badmerkle.clone())),
         Some(hex) => {
-            let bytes =
-                Vec::<u8>::from_hex(hex).map_err(|_| "block: expected raw block hex or `sample:genesis|block1`")?;
+            let bytes = Vec::<u8>::from_hex(hex)
+                .map_err(|_| "block: expected raw block hex or `sample:genesis|block1|block-badmerkle`")?;
             let block: Block = deserialize(&bytes).map_err(|e| format!("block decode: {e}"))?;
             Ok(M::Block(block))
         }
-        None => Err("usage: send block sample:genesis|block1 | send block <hex>".to_string()),
+        None => Err(
+            "usage: send block sample:genesis|block1|block-badmerkle | send block <hex>".to_string(),
+        ),
     }
 }
 
