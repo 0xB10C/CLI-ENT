@@ -63,6 +63,16 @@ pub const MESSAGES: &[&str] = &[
     "notfound",
     "getheaders",
     "getblocks",
+    "getcfilters",
+    "getcfheaders",
+    "getblocktxn",
+    "version",
+    "tx",
+    "block",
+    "headers",
+    "cmpctblock",
+    "blocktxn",
+    "raw",
 ];
 
 /// The rustyline helper carrying our completer.

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoin::p2p::{Magic, ServiceFlags};
+use bitcoin::p2p::Magic;
 use clap::Parser;
 use rustyline::history::DefaultHistory;
 use rustyline::{Config, CompletionType, Editor};
@@ -170,7 +170,8 @@ fn build_handshaker(args: &Args) -> Result<Handshaker> {
         version.protocol_version = pv;
     }
     if let Some(s) = &args.services {
-        version.services = parse_services(s).context("parsing --services")?;
+        version.services =
+            cli_ent::messages::dsl::parse_services(s).map_err(|e| anyhow!(e)).context("parsing --services")?;
     }
     if let Some(h) = args.start_height {
         version.start_height = h;
@@ -184,32 +185,4 @@ fn build_handshaker(args: &Args) -> Result<Handshaker> {
         verack_manual: matches!(args.verack, Verack::Manual),
         version,
     })
-}
-
-/// Parse service flags: an integer (`0x…`/decimal) or `|`-joined names.
-fn parse_services(s: &str) -> Result<ServiceFlags> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix("0x") {
-        let n = u64::from_str_radix(hex, 16).map_err(|_| anyhow!("invalid hex mask {s:?}"))?;
-        return Ok(ServiceFlags::from(n));
-    }
-    if let Ok(n) = s.parse::<u64>() {
-        return Ok(ServiceFlags::from(n));
-    }
-    let mut flags = ServiceFlags::NONE;
-    for name in s.split('|') {
-        let f = match name.trim().to_ascii_uppercase().as_str() {
-            "NONE" => ServiceFlags::NONE,
-            "NETWORK" => ServiceFlags::NETWORK,
-            "GETUTXO" => ServiceFlags::GETUTXO,
-            "BLOOM" => ServiceFlags::BLOOM,
-            "WITNESS" => ServiceFlags::WITNESS,
-            "COMPACT_FILTERS" => ServiceFlags::COMPACT_FILTERS,
-            "NETWORK_LIMITED" => ServiceFlags::NETWORK_LIMITED,
-            "P2P_V2" => ServiceFlags::P2P_V2,
-            other => bail!("unknown service flag {other:?}"),
-        };
-        flags |= f;
-    }
-    Ok(flags)
 }

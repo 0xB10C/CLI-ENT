@@ -58,7 +58,7 @@ fn dispatch(
     printer: &Printer,
     samples: &Arc<SampleData>,
 ) -> Flow {
-    match parse(line) {
+    match parse(line, samples) {
         Action::Nothing => Flow::Continue,
         Action::Quit => {
             let _ = commands.send(Command::Quit);
