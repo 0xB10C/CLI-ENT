@@ -25,6 +25,7 @@ use crate::net::connect::connect;
 use crate::net::resolve::resolve;
 use crate::net::transport::{FrameError, Reader, TransportKind, Wire, Writer};
 
+use self::automations::{AutoKind, Automations};
 use self::events::{Command, DisconnectReason, Direction, Event, HandshakeState};
 use self::handshake::Handshaker;
 use self::view::SessionView;
@@ -49,6 +50,8 @@ struct ConnState {
     hs: HandshakeState,
     addr: SocketAddr,
     ready_emitted: bool,
+    /// Whether the peer sent `wtxidrelay` (used by the getdata automation).
+    wtxidrelay: bool,
     /// A pending delayed verack (armed by `--verack-delay`).
     pending_verack: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
@@ -67,23 +70,33 @@ pub struct Session {
     view: Arc<Mutex<SessionView>>,
     events: UnboundedSender<Event>,
     commands: UnboundedReceiver<Command>,
+    automations: Automations,
     seq: u64,
 }
 
 impl Session {
     pub fn new(
         config: SessionConfig,
+        automations: Automations,
         view: Arc<Mutex<SessionView>>,
         events: UnboundedSender<Event>,
         commands: UnboundedReceiver<Command>,
     ) -> Self {
+        view.lock().unwrap().automations = automations.state;
         Self {
             config,
             view,
             events,
             commands,
+            automations,
             seq: 1,
         }
+    }
+
+    /// Apply an automation toggle and mirror it to the view.
+    fn set_auto(&mut self, kind: AutoKind, on: bool) {
+        self.automations.state.set(kind, on);
+        self.view.lock().unwrap().automations = self.automations.state;
     }
 
     /// Run until `Quit` (or all command senders drop). Consumes `self`.
@@ -111,6 +124,7 @@ impl Session {
                         }
                     }
                 }
+                Some(Command::SetAuto { kind, on }) => self.set_auto(kind, on),
                 Some(Command::Disconnect) => {
                     let _ = self
                         .events
@@ -174,6 +188,7 @@ impl Session {
             hs: HandshakeState::default(),
             addr,
             ready_emitted: false,
+            wtxidrelay: false,
             pending_verack: None,
         })
     }
@@ -213,6 +228,7 @@ impl Session {
                     match cmd {
                         Some(Command::Send(msg)) => self.send(conn, msg, None).await,
                         Some(Command::SendRaw(bytes)) => self.send_raw(conn, bytes, None).await,
+                        Some(Command::SetAuto { kind, on }) => self.set_auto(kind, on),
                         Some(Command::Connect { .. }) => {
                             let _ = self.events.send(Event::Error(
                                 "already connected; disconnect first".to_string(),
@@ -294,7 +310,11 @@ impl Session {
         let at = Instant::now();
         self.view.lock().unwrap().record(seq, Direction::Recv, &wire, at);
 
-        let mut responses = Vec::new();
+        // Handshake reactions (from the profile) and automation reactions are
+        // collected separately: profile sends are untagged, automation sends carry
+        // an `auto: …` tag.
+        let mut responses: Vec<NetworkMessage> = Vec::new();
+        let mut auto_responses: Vec<(NetworkMessage, String)> = Vec::new();
         if let Some(msg) = &wire.msg {
             match msg {
                 NetworkMessage::Version(v) => {
@@ -306,8 +326,10 @@ impl Session {
                     conn.hs.verack_received = true;
                     responses = self.config.handshaker.on_peer_verack();
                 }
-                _ => {}
+                other => self.note_negotiation(conn, other),
             }
+            // Automations react to any message (they no-op on handshake messages).
+            auto_responses = self.automations.on_message(msg, conn.wtxidrelay);
         }
 
         let decode_error = wire.decode_error.clone();
@@ -331,7 +353,29 @@ impl Session {
             }
             self.send(conn, msg, None).await;
         }
+        for (msg, tag) in auto_responses {
+            self.send(conn, msg, Some(tag)).await;
+        }
         self.sync_handshake(conn);
+    }
+
+    /// Record feature negotiation from the peer (for `status` and the getdata
+    /// automation's witness upgrade).
+    fn note_negotiation(&mut self, conn: &mut ConnState, msg: &NetworkMessage) {
+        let mut v = self.view.lock().unwrap();
+        match msg {
+            NetworkMessage::WtxidRelay => {
+                conn.wtxidrelay = true;
+                v.peer.negotiated.wtxidrelay = true;
+            }
+            NetworkMessage::SendAddrV2 => v.peer.negotiated.addrv2 = true,
+            NetworkMessage::SendHeaders => v.peer.negotiated.sendheaders = true,
+            NetworkMessage::SendCmpct(s) => {
+                v.peer.negotiated.sendcmpct = Some((s.send_compact, s.version))
+            }
+            NetworkMessage::FeeFilter(f) => v.peer.negotiated.feefilter = Some(*f),
+            _ => {}
+        }
     }
 
     // (helper `tick` lives at module scope, below.)

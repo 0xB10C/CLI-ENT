@@ -16,9 +16,11 @@ use rustyline::history::DefaultHistory;
 use rustyline::{Config, CompletionType, Editor};
 
 use cli_ent::cli::{Args, Transport as TransportPref, Verack};
+use cli_ent::messages::samples::SampleData;
 use cli_ent::repl::completer::ReplHelper;
 use cli_ent::repl::printer::Printer;
 use cli_ent::repl::{event_loop, run as run_repl, run_plain};
+use cli_ent::session::automations::Automations;
 use cli_ent::session::events::Command;
 use cli_ent::session::handshake::{Handshaker, Profile, VersionConfig};
 use cli_ent::session::view::SessionView;
@@ -78,7 +80,11 @@ fn main() -> Result<()> {
         .build()
         .context("building tokio runtime")?;
 
-    let session = Session::new(config, view.clone(), ev_tx, cmd_rx);
+    // Sample data (genesis/block1/tx) is shared by the serve automation and the
+    // REPL's preset expansion.
+    let samples = std::sync::Arc::new(SampleData::new(args.network.to_bitcoin()));
+    let automations = Automations::new(samples.clone());
+    let session = Session::new(config, automations, view.clone(), ev_tx, cmd_rx);
 
     if interactive {
         let editor_config = Config::builder()
@@ -97,7 +103,7 @@ fn main() -> Result<()> {
         rt.spawn(event_loop(ev_rx, printer.clone(), color));
         initial_connect(&cmd_tx, &args);
 
-        run_repl(view, cmd_tx, printer, editor);
+        run_repl(view, cmd_tx, printer, samples, editor);
     } else {
         let printer = Printer::plain(log_file);
 
@@ -106,7 +112,7 @@ fn main() -> Result<()> {
         initial_connect(&cmd_tx, &args);
 
         let stdin = std::io::stdin();
-        run_plain(stdin.lock(), view, cmd_tx, printer);
+        run_plain(stdin.lock(), view, cmd_tx, printer, samples);
     }
 
     // Give in-flight teardown a moment, then stop the runtime.

@@ -11,12 +11,15 @@ pub mod printer;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
 use rustyline::Editor;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::messages::summary::{human_bytes, render_event, services_short};
+use crate::messages::samples::SampleData;
+use crate::messages::{presets, summary::human_bytes, summary::render_event, summary::services_short};
+use crate::session::automations::{AutoKind, AutoState};
 use crate::session::events::{Command, Event, HandshakeState};
 use crate::session::view::SessionView;
 
@@ -53,6 +56,7 @@ fn dispatch(
     view: &Arc<Mutex<SessionView>>,
     commands: &UnboundedSender<Command>,
     printer: &Printer,
+    samples: &Arc<SampleData>,
 ) -> Flow {
     match parse(line) {
         Action::Nothing => Flow::Continue,
@@ -72,6 +76,27 @@ fn dispatch(
             print_show(view, printer, target, hex);
             Flow::Continue
         }
+        Action::AutoList => {
+            print_auto(view, printer);
+            Flow::Continue
+        }
+        Action::PresetList => {
+            for (name, desc) in presets::list() {
+                printer.line(&format!("  {name:<22} {desc}"));
+            }
+            Flow::Continue
+        }
+        Action::Preset(name) => {
+            match presets::build(&name, samples) {
+                Some(msgs) => {
+                    for msg in msgs {
+                        let _ = commands.send(Command::Send(msg));
+                    }
+                }
+                None => printer.line(&format!("unknown preset {name:?}; try `preset list`")),
+            }
+            Flow::Continue
+        }
         Action::Help(topic) => {
             print_help(printer, topic.as_deref());
             Flow::Continue
@@ -88,13 +113,14 @@ pub fn run(
     view: Arc<Mutex<SessionView>>,
     commands: UnboundedSender<Command>,
     printer: Printer,
+    samples: Arc<SampleData>,
     mut editor: Editor<ReplHelper, DefaultHistory>,
 ) {
     loop {
         match editor.readline(PROMPT) {
             Ok(line) => {
                 let _ = editor.add_history_entry(line.as_str());
-                if let Flow::Quit = dispatch(&line, &view, &commands, &printer) {
+                if let Flow::Quit = dispatch(&line, &view, &commands, &printer, &samples) {
                     break;
                 }
             }
@@ -120,10 +146,11 @@ pub fn run_plain<R: std::io::BufRead>(
     view: Arc<Mutex<SessionView>>,
     commands: UnboundedSender<Command>,
     printer: Printer,
+    samples: Arc<SampleData>,
 ) {
     for line in input.lines() {
         let Ok(line) = line else { break };
-        if let Flow::Quit = dispatch(&line, &view, &commands, &printer) {
+        if let Flow::Quit = dispatch(&line, &view, &commands, &printer, &samples) {
             return;
         }
     }
@@ -164,6 +191,21 @@ fn print_status(view: &Arc<Mutex<SessionView>>, printer: &Printer) {
             pv.relay
         ));
     }
+    let n = &v.peer.negotiated;
+    let sendcmpct = n
+        .sendcmpct
+        .map(|(hb, ver)| format!("sendcmpct v{ver} hb={hb}  "))
+        .unwrap_or_default();
+    let feefilter = n
+        .feefilter
+        .map(|f| format!("feefilter {f} sat/kvB"))
+        .unwrap_or_default();
+    lines.push(format!(
+        "negotiated    wtxidrelay {}  addrv2 {}  sendheaders {}  {sendcmpct}{feefilter}",
+        yn(n.wtxidrelay),
+        yn(n.addrv2),
+        yn(n.sendheaders),
+    ));
     lines.push(format!(
         "traffic       in {} msgs / {}   out {} msgs / {}",
         v.stats.msgs_in,
@@ -171,9 +213,31 @@ fn print_status(view: &Arc<Mutex<SessionView>>, printer: &Printer) {
         v.stats.msgs_out,
         human_bytes(v.stats.bytes_out),
     ));
+    lines.push(format!("automations   {}", auto_line(&v.automations)));
     for l in lines {
         printer.line(&l);
     }
+}
+
+fn yn(b: bool) -> &'static str {
+    if b {
+        "✓"
+    } else {
+        "✗"
+    }
+}
+
+fn auto_line(a: &AutoState) -> String {
+    AutoKind::ALL
+        .iter()
+        .map(|k| format!("{} {}", k.name(), yn(a.get(*k))))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn print_auto(view: &Arc<Mutex<SessionView>>, printer: &Printer) {
+    let a = view.lock().unwrap().automations;
+    printer.line(&auto_line(&a));
 }
 
 fn handshake_str(hs: &HandshakeState) -> String {

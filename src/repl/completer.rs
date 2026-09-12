@@ -16,10 +16,34 @@ pub const COMMANDS: &[&str] = &[
     "status",
     "send",
     "show",
+    "auto",
+    "preset",
     "help",
     "quit",
     "exit",
 ];
+
+/// Preset names (PLAN.md §10), for completion after `preset`.
+pub const PRESETS: &[&str] = &[
+    "inv-getdata-tx",
+    "inv-getdata-block",
+    "cmpctblock-block1",
+    "getblocktxn-block1",
+    "blocktxn-block1",
+    "ping",
+    "getaddr",
+    "mempool",
+    "sendheaders",
+    "feefilter",
+    "sendcmpct",
+    "getheaders-genesis",
+    "getblocks-genesis",
+    "getcfheaders-genesis",
+    "getcfilters-genesis",
+];
+
+/// Automation names, for completion after `auto on`/`auto off`.
+pub const AUTOMATIONS: &[&str] = &["pong", "headers-empty", "serve", "getdata"];
 
 /// Message names understood by `send` in milestone 2.
 pub const MESSAGES: &[&str] = &[
@@ -65,6 +89,10 @@ impl Completer for ReplHelper {
             COMMANDS
         } else if before == "send" {
             MESSAGES
+        } else if before == "preset" {
+            PRESETS
+        } else if before == "auto on" || before == "auto off" {
+            AUTOMATIONS
         } else {
             &[]
         };

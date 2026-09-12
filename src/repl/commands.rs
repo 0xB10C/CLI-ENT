@@ -13,6 +13,7 @@ use bitcoin::p2p::message_compact_blocks::SendCmpct;
 use bitcoin::{BlockHash, Txid, Wtxid};
 
 use crate::cli::Transport as TransportPref;
+use crate::session::automations::AutoKind;
 use crate::session::events::Command;
 
 /// What the REPL should do with a parsed line.
@@ -25,6 +26,12 @@ pub enum Action {
     Status,
     /// Show a ring-buffer entry.
     Show { target: ShowTarget, hex: bool },
+    /// List automation state.
+    AutoList,
+    /// List preset names.
+    PresetList,
+    /// Run a named preset (expanded to sends by the REPL).
+    Preset(String),
     /// Print help (optionally for one topic).
     Help(Option<String>),
     /// Leave the REPL.
@@ -55,6 +62,12 @@ pub fn parse(line: &str) -> Action {
         "status" => Action::Status,
         "show" => parse_show(&rest),
         "send" => parse_send(&rest),
+        "auto" => parse_auto(&rest),
+        "preset" => match rest.split_first() {
+            None => Action::PresetList,
+            Some((&"list", _)) => Action::PresetList,
+            Some((name, _)) => Action::Preset(name.to_string()),
+        },
         "help" => Action::Help(rest.first().map(|s| s.to_string())),
         "quit" | "exit" => Action::Quit,
         other => Action::Usage(format!("unknown command {other:?}; try `help`")),
@@ -81,6 +94,21 @@ fn parse_connect(args: &[&str]) -> Action {
             transport,
         }),
         None => Action::Usage("usage: connect <host:port> [--v1|--v2|--auto]".to_string()),
+    }
+}
+
+fn parse_auto(args: &[&str]) -> Action {
+    match args {
+        [] | ["list"] => Action::AutoList,
+        ["on", name] => match AutoKind::from_str(name) {
+            Ok(kind) => Action::ToSession(Command::SetAuto { kind, on: true }),
+            Err(e) => Action::Usage(e),
+        },
+        ["off", name] => match AutoKind::from_str(name) {
+            Ok(kind) => Action::ToSession(Command::SetAuto { kind, on: false }),
+            Err(e) => Action::Usage(e),
+        },
+        _ => Action::Usage("usage: auto [list | on <name> | off <name>]".to_string()),
     }
 }
 

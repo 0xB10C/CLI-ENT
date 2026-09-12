@@ -12,6 +12,7 @@ use bitcoin::p2p::message_network::VersionMessage;
 
 use crate::net::transport::{TransportKind, Wire};
 
+use super::automations::AutoState;
 use super::events::{Direction, HandshakeState};
 
 /// How many recent messages the ring buffer retains (PLAN.md §12).
@@ -28,6 +29,17 @@ pub struct PeerState {
     pub fell_back: Option<String>,
     pub handshake: HandshakeState,
     pub peer_version: Option<VersionMessage>,
+    pub negotiated: Negotiated,
+}
+
+/// Feature negotiation observed from the peer (for `status`).
+#[derive(Debug, Default, Clone)]
+pub struct Negotiated {
+    pub wtxidrelay: bool,
+    pub addrv2: bool,
+    pub sendheaders: bool,
+    pub sendcmpct: Option<(bool, u64)>,
+    pub feefilter: Option<i64>,
 }
 
 /// Byte and message counters, per direction and per command (PLAN.md §12).
@@ -74,6 +86,8 @@ pub struct SessionView {
     pub peer: PeerState,
     pub stats: SessionStats,
     pub ring: VecDeque<RingEntry>,
+    /// Current automation on/off state, mirrored from the session.
+    pub automations: AutoState,
 }
 
 impl SessionView {

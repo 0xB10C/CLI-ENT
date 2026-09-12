@@ -24,6 +24,11 @@ pub enum Command {
     Send(NetworkMessage),
     /// Send pre-framed (v1) or pre-encrypted (v2) bytes as-is.
     SendRaw(Vec<u8>),
+    /// Turn an automation on or off.
+    SetAuto {
+        kind: crate::session::automations::AutoKind,
+        on: bool,
+    },
     /// Close the connection but keep the session task alive.
     Disconnect,
     /// Close the connection and end the session task.
