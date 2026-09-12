@@ -129,18 +129,30 @@ impl Session {
         let pref = transport.unwrap_or(self.config.default_transport);
         let addr = resolve(spec, self.config.default_port)?;
 
+        let attempt = match pref {
+            TransportPref::V1 => TransportKind::V1,
+            TransportPref::V2 | TransportPref::Auto => TransportKind::V2,
+        };
         let _ = self.events.send(Event::Connecting {
             addr,
-            transport: TransportKind::V1,
+            transport: attempt,
         });
 
         let conn = connect(addr, pref, self.config.magic, self.config.timeout).await?;
+
+        if let Some(reason) = &conn.fell_back {
+            let _ = self.events.send(Event::FellBackToV1 {
+                reason: reason.clone(),
+            });
+        }
 
         {
             let mut v = self.view.lock().unwrap();
             v.reset_connection();
             v.peer.addr = Some(addr);
             v.peer.transport = Some(conn.kind);
+            v.peer.v2_session_id = conn.session_id;
+            v.peer.fell_back = conn.fell_back.clone();
             v.peer.resolved_from = (spec != addr.to_string()).then(|| spec.to_string());
             v.stats.connected_at = Some(Instant::now());
         }
@@ -148,6 +160,7 @@ impl Session {
         let _ = self.events.send(Event::Connected {
             addr,
             transport: conn.kind,
+            v2_session_id: conn.session_id,
         });
 
         Ok(ConnState {

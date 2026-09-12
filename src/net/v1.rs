@@ -141,6 +141,39 @@ impl V1Writer {
     }
 }
 
+/// The consensus-serialized payload of a message (the bytes after the 24-byte v1
+/// header). Used by the v2 path, which frames payloads differently.
+pub fn payload_bytes(magic: Magic, msg: &NetworkMessage) -> Vec<u8> {
+    let raw = RawNetworkMessage::new(magic, msg.clone());
+    let bytes = consensus::serialize(&raw);
+    bytes[HEADER_LEN..].to_vec()
+}
+
+/// Build a canonical v1 frame (with the correct checksum) from a command and
+/// payload, then decode it into a `NetworkMessage`. Returns the parsed message or
+/// the decode error. Shared by the v1 reader and the v2 short-ID decoder.
+pub fn decode_payload(
+    magic: Magic,
+    command: &str,
+    payload: &[u8],
+) -> (Option<NetworkMessage>, Option<String>) {
+    let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
+    frame.extend_from_slice(&magic.to_bytes());
+    let mut cmd = [0u8; 12];
+    let bytes = command.as_bytes();
+    let n = bytes.len().min(12);
+    cmd[..n].copy_from_slice(&bytes[..n]);
+    frame.extend_from_slice(&cmd);
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&checksum(payload));
+    frame.extend_from_slice(payload);
+
+    match consensus::deserialize::<RawNetworkMessage>(&frame) {
+        Ok(raw_msg) => (Some(raw_msg.into_payload()), None),
+        Err(e) => (None, Some(e.to_string())),
+    }
+}
+
 /// Derive the frame metadata from a well-formed serialized v1 frame (used for
 /// messages we send, whose checksum is always correct).
 pub fn frame_kind(raw: &[u8]) -> FrameKind {

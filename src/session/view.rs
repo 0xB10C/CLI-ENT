@@ -24,6 +24,8 @@ pub struct PeerState {
     /// The original peer spec, when it differed from the resolved address.
     pub resolved_from: Option<String>,
     pub transport: Option<TransportKind>,
+    pub v2_session_id: Option<[u8; 32]>,
+    pub fell_back: Option<String>,
     pub handshake: HandshakeState,
     pub peer_version: Option<VersionMessage>,
 }

@@ -11,6 +11,7 @@ use std::fmt;
 use bitcoin::p2p::message::NetworkMessage;
 
 use super::v1::{V1Reader, V1Writer};
+use super::v2::{V2Reader, V2Writer};
 
 /// Which transport a connection is using.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +40,14 @@ pub enum FrameKind {
         /// Whether the checksum the peer sent matched the payload.
         checksum_ok: bool,
     },
-    // V2 { cipher_len, decoy, short_id } — added in milestone 3.
+    V2 {
+        /// Total wire size of the encrypted packet (3-byte length + ciphertext).
+        cipher_len: usize,
+        /// Whether the packet was a decoy.
+        decoy: bool,
+        /// The short message ID, if the message used one.
+        short_id: Option<u8>,
+    },
 }
 
 /// One message as it appeared on the wire, in either direction.
@@ -64,6 +72,8 @@ impl Wire {
             Some(m) => m.cmd().to_string(),
             None => match &self.frame {
                 FrameKind::V1 { command, .. } => command.clone(),
+                FrameKind::V2 { decoy: true, .. } => "decoy".to_string(),
+                FrameKind::V2 { .. } => "?".to_string(),
             },
         }
     }
@@ -100,6 +110,7 @@ impl From<std::io::Error> for FrameError {
 /// The read half of a transport.
 pub enum Reader {
     V1(V1Reader),
+    V2(V2Reader),
 }
 
 impl Reader {
@@ -109,6 +120,7 @@ impl Reader {
     pub async fn read_message(&mut self) -> Result<Wire, FrameError> {
         match self {
             Reader::V1(r) => r.read_message().await,
+            Reader::V2(r) => r.read_message().await,
         }
     }
 }
@@ -117,12 +129,14 @@ impl Reader {
 /// cipher, which lives on the write side).
 pub enum Writer {
     V1(V1Writer),
+    V2(V2Writer),
 }
 
 impl Writer {
     pub fn kind(&self) -> TransportKind {
         match self {
             Writer::V1(_) => TransportKind::V1,
+            Writer::V2(_) => TransportKind::V2,
         }
     }
 
@@ -131,18 +145,21 @@ impl Writer {
     pub fn encode(&mut self, msg: &NetworkMessage) -> (Vec<u8>, Wire) {
         match self {
             Writer::V1(w) => w.encode(msg),
+            Writer::V2(w) => w.encode(msg),
         }
     }
 
     pub async fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         match self {
             Writer::V1(w) => w.write_bytes(bytes).await,
+            Writer::V2(w) => w.write_bytes(bytes).await,
         }
     }
 
     pub async fn close(&mut self) -> std::io::Result<()> {
         match self {
             Writer::V1(w) => w.close().await,
+            Writer::V2(w) => w.close().await,
         }
     }
 }

@@ -87,6 +87,11 @@ pub enum Event {
     Connected {
         addr: SocketAddr,
         transport: TransportKind,
+        v2_session_id: Option<[u8; 32]>,
+    },
+    /// `auto` probed v2 and fell back to v1.
+    FellBackToV1 {
+        reason: String,
     },
     Sent {
         seq: u64,

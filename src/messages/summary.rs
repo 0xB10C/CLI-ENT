@@ -95,8 +95,18 @@ pub fn render_event(ev: &Event, t0: Instant, color: bool) -> Option<String> {
         Event::Connecting { addr, transport } => {
             Some(format!("connecting to {addr} ({transport})"))
         }
-        Event::Connected { addr, transport } => {
-            Some(format!("connected to {addr}  transport {transport}"))
+        Event::Connected {
+            addr,
+            transport,
+            v2_session_id,
+        } => {
+            let sid = v2_session_id
+                .map(|id| format!("  session-id {}", short_hex(&id)))
+                .unwrap_or_default();
+            Some(format!("connected to {addr}  transport {transport}{sid}"))
+        }
+        Event::FellBackToV1 { reason } => {
+            Some(st.dim(&format!("fell back to v1: {reason}")))
         }
         Event::Sent {
             seq,
@@ -165,7 +175,21 @@ pub fn render_event(ev: &Event, t0: Instant, color: bool) -> Option<String> {
 fn raw_note(frame: &FrameKind) -> String {
     match frame {
         FrameKind::V1 { len, .. } => format!("raw, {len} bytes"),
+        FrameKind::V2 {
+            decoy: true,
+            cipher_len,
+            ..
+        } => format!("decoy ({cipher_len} bytes)"),
+        FrameKind::V2 { cipher_len, .. } => format!("raw, {cipher_len} bytes"),
     }
+}
+
+/// First and last 4 bytes of a 32-byte id as hex, e.g. `3f9a…c21e`.
+fn short_hex(id: &[u8; 32]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}{:02x}{:02x}",
+        id[0], id[1], id[2], id[3], id[28], id[29], id[30], id[31]
+    )
 }
 
 fn arrow(dir: Direction, st: &Style) -> String {
