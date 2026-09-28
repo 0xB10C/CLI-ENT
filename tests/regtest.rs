@@ -94,6 +94,8 @@ async fn spam_ping_stays_connected() {
     h.connect(addr, Transport::V2);
     h.wait_ready(READY).await;
 
+    // The Core handshake profile sends a ping of its own, so count the delta.
+    let pings_before = pings_out(&h);
     h.send(Command::Spam {
         msg: bitcoin::p2p::message::NetworkMessage::Ping(0),
         rate: None,
@@ -107,4 +109,29 @@ async fn spam_ping_stays_connected() {
     assert!(pings > 0, "node should have received pings");
     // Sanity: RPC still responsive.
     let _ = rpc(&node, "getblockcount");
+
+    // The burst is visible without flooding: a sample of the sends is printed,
+    // every one of them is counted, and the run reports its total.
+    let lines = h.lines.lock().unwrap().clone();
+    let shown: Vec<&String> = lines.iter().filter(|l| l.contains("spam #")).collect();
+    assert!(!shown.is_empty(), "spam printed nothing: {lines:#?}");
+    assert!(
+        shown.len() < 20,
+        "an unpaced 200-message burst should be throttled, printed {}",
+        shown.len()
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("spam ended: 200 sent")),
+        "missing the spam summary: {lines:#?}"
+    );
+    assert_eq!(
+        pings_out(&h) - pings_before,
+        200,
+        "every spam send should reach the traffic counters"
+    );
+}
+
+/// Pings our session has sent, per its own traffic counters.
+fn pings_out(h: &Harness) -> u64 {
+    h.view.lock().unwrap().stats.per_msg_out.get("ping").copied().unwrap_or(0)
 }

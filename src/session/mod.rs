@@ -30,6 +30,14 @@ use self::events::{Command, DisconnectReason, Direction, Event, HandshakeState};
 use self::handshake::Handshaker;
 use self::view::SessionView;
 
+/// Print the opening sends of a `spam` run in full, so short bursts are shown
+/// whole whatever their rate.
+const SPAM_PRINT_HEAD: u64 = 10;
+
+/// Past the head, print at most one `spam` send per this interval; the rest are
+/// counted only.
+const SPAM_PRINT_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Immutable connection parameters shared across (re)connects.
 pub struct SessionConfig {
     pub default_port: u16,
@@ -73,6 +81,34 @@ struct SpamState {
     remaining: Option<u64>,
     sent: u64,
     started: Instant,
+    /// When the last send was printed; `None` until the first one is.
+    last_print: Option<Instant>,
+    /// Sends counted but not printed since `last_print`.
+    since_print: u64,
+}
+
+impl SpamState {
+    /// Count one send and decide whether to show it. Returns `Some((total,
+    /// suppressed))` for a send that should be printed — the first
+    /// [`SPAM_PRINT_HEAD`], then one per [`SPAM_PRINT_INTERVAL`] — where
+    /// `suppressed` is how many sends went unprinted since the previous printed
+    /// one.
+    fn note_send(&mut self, at: Instant) -> Option<(u64, u64)> {
+        self.sent += 1;
+        let due = self.sent <= SPAM_PRINT_HEAD
+            || match self.last_print {
+                Some(prev) => at.duration_since(prev) >= SPAM_PRINT_INTERVAL,
+                None => true,
+            };
+        if !due {
+            self.since_print += 1;
+            return None;
+        }
+        let shown = (self.sent, self.since_print);
+        self.last_print = Some(at);
+        self.since_print = 0;
+        Some(shown)
+    }
 }
 
 /// How a connected phase ended.
@@ -307,6 +343,8 @@ impl Session {
                     remaining: count,
                     sent: 0,
                     started: Instant::now(),
+                    last_print: None,
+                    since_print: 0,
                 });
             }
             Command::StopSpam => self.stop_spam(conn),
@@ -421,24 +459,47 @@ impl Session {
     }
 
     /// Send one spam packet (re-encoding each time so the v2 cipher advances).
+    ///
+    /// Every send is counted, but past the opening [`SPAM_PRINT_HEAD`] only one
+    /// per [`SPAM_PRINT_INTERVAL`] is ringed and printed: at `--rate 5000/s` a
+    /// line each would drown the terminal and flush the ring.
     async fn spam_step(&mut self, conn: &mut ConnState) {
         let msg = match &conn.spam {
             Some(s) => s.msg.clone(),
             None => return,
         };
-        let (bytes, _wire) = conn.writer.encode(&msg);
+        let (bytes, wire) = conn.writer.encode(&msg);
         if conn.writer.write_bytes(&bytes).await.is_err() {
             self.stop_spam(conn);
             return;
         }
+
+        let at = Instant::now();
+        let mut show = None;
+        let mut finished = false;
         if let Some(s) = conn.spam.as_mut() {
-            s.sent += 1;
+            show = s.note_send(at);
             if let Some(r) = s.remaining.as_mut() {
                 *r -= 1;
-                if *r == 0 {
-                    self.stop_spam(conn);
-                }
+                finished = *r == 0;
             }
+        }
+
+        match show {
+            Some((sent, skipped)) => {
+                let seq = self.next_seq();
+                self.view.lock().unwrap().record(seq, Direction::Sent, &wire, at);
+                let tag = match skipped {
+                    0 => format!("spam #{sent}"),
+                    n => format!("spam #{sent}, {n} more not shown"),
+                };
+                let _ = self.events.send(Event::Sent { seq, wire, at, tag: Some(tag) });
+            }
+            None => self.view.lock().unwrap().count_sent(&wire),
+        }
+
+        if finished {
+            self.stop_spam(conn);
         }
     }
 
@@ -639,5 +700,61 @@ async fn drip_wait(drip: &Option<(usize, Duration)>, holding: bool) {
     match (drip, holding) {
         (Some((_, interval)), true) => tokio::time::sleep(*interval).await,
         _ => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spam(interval: Option<Duration>) -> SpamState {
+        SpamState {
+            msg: NetworkMessage::Ping(0),
+            interval,
+            remaining: None,
+            sent: 0,
+            started: Instant::now(),
+            last_print: None,
+            since_print: 0,
+        }
+    }
+
+    #[test]
+    fn unpaced_spam_prints_the_head_then_throttles() {
+        let mut s = spam(None);
+        let t0 = Instant::now();
+        // The head prints in full, however fast the sends arrive.
+        for i in 1..=SPAM_PRINT_HEAD {
+            assert_eq!(s.note_send(t0), Some((i, 0)));
+        }
+        assert_eq!(s.note_send(t0 + Duration::from_millis(1)), None);
+        assert_eq!(s.note_send(t0 + Duration::from_millis(400)), None);
+        // Due again: the two sends in between went unprinted.
+        let n = SPAM_PRINT_HEAD;
+        assert_eq!(s.note_send(t0 + SPAM_PRINT_INTERVAL), Some((n + 3, 2)));
+        assert_eq!(s.note_send(t0 + SPAM_PRINT_INTERVAL), None);
+        assert_eq!(s.sent, n + 4, "every send is counted, printed or not");
+    }
+
+    #[test]
+    fn short_burst_prints_every_send() {
+        // `spam ping --rate 4/s --count 6`: faster than the throttle, but the
+        // whole run fits in the head.
+        let interval = Duration::from_millis(250);
+        let mut s = spam(Some(interval));
+        let t0 = Instant::now();
+        for i in 1..=6u64 {
+            assert_eq!(s.note_send(t0 + interval * i as u32), Some((i, 0)));
+        }
+    }
+
+    #[test]
+    fn slow_spam_prints_every_send() {
+        let interval = Duration::from_secs(1);
+        let mut s = spam(Some(interval));
+        let t0 = Instant::now();
+        for i in 1..=SPAM_PRINT_HEAD + 5 {
+            assert_eq!(s.note_send(t0 + interval * i as u32), Some((i, 0)));
+        }
     }
 }

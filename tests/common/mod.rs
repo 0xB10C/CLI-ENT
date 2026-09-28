@@ -20,6 +20,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use cli_ent::cli::Transport as TransportPref;
 use cli_ent::messages::samples::SampleData;
+use cli_ent::messages::summary::render_event;
 use cli_ent::session::automations::Automations;
 use cli_ent::session::events::{Command, Event};
 use cli_ent::session::handshake::{Handshaker, Profile, VersionConfig};
@@ -110,6 +111,8 @@ pub struct Harness {
     pub view: Arc<Mutex<SessionView>>,
     pub commands: UnboundedSender<Command>,
     pub samples: Arc<SampleData>,
+    /// Every event, rendered exactly as the REPL would print it.
+    pub lines: Arc<Mutex<Vec<String>>>,
     _events: tokio::task::JoinHandle<()>,
     _session: tokio::task::JoinHandle<()>,
 }
@@ -139,12 +142,14 @@ impl Harness {
 
         let session = Session::new(config, automations, view.clone(), ev_tx, cmd_rx);
         let session_handle = tokio::spawn(session.run());
-        let events_handle = tokio::spawn(drain(ev_rx));
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = tokio::spawn(drain(ev_rx, lines.clone()));
 
         Harness {
             view,
             commands: cmd_tx,
             samples,
+            lines,
             _events: events_handle,
             _session: session_handle,
         }
@@ -174,8 +179,15 @@ impl Harness {
     }
 }
 
-async fn drain(mut rx: UnboundedReceiver<Event>) {
-    while rx.recv().await.is_some() {}
+/// Render every event the way the REPL printer does, so tests can assert on the
+/// output a user would actually see.
+async fn drain(mut rx: UnboundedReceiver<Event>, lines: Arc<Mutex<Vec<String>>>) {
+    let t0 = Instant::now();
+    while let Some(ev) = rx.recv().await {
+        if let Some(line) = render_event(&ev, t0, false) {
+            lines.lock().unwrap().push(line);
+        }
+    }
 }
 
 /// Poll `cond` until true or the timeout elapses.

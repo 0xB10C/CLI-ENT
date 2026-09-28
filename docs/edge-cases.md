@@ -47,7 +47,8 @@ send feefilter 1000      # feefilter is 70013+; does the node version-gate it?
 # pings as fast as possible — watch the node's backlog handling
 spam ping
 
-# find the rate where it starts pushing back
+# find the rate where it starts pushing back (the send lines are sampled at this
+# rate — `status` keeps the real totals)
 spam ping --rate 5000/s
 stop
 

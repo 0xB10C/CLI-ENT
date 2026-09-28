@@ -55,7 +55,16 @@ Tab completion covers command, message, preset, and automation names. Ctrl-C
 cancels the current line; Ctrl-D quits. Output is coloured on a TTY and plain when
 piped or redirected.
 
+Every message prints a line, sent or received, and sends the tool makes on its own
+carry their source as a tag: `(auto: pong)` for an automation, `(spam #12)` for a
+`spam` run. A fast `spam` is sampled rather than printed in full — the first ten
+sends, then one line every 500ms noting how many went unshown
+(`(spam #55264, 55253 more not shown)`) — because a line per send at 100k/s drowns
+the terminal and flushes the `show` ring. Sampling never touches the counters:
+`status` and the disconnect summary still see every send.
+
 ## Sending messages
+
 
 The field DSL covers the common messages; everything else goes through `hex:`.
 

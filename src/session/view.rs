@@ -109,6 +109,15 @@ impl SessionView {
         });
     }
 
+    /// Count a sent message in the stats without adding it to the ring.
+    ///
+    /// High-rate `spam` prints (and rings) only a sample of its sends, but every
+    /// send still has to reach the traffic counters, and the ring has to keep the
+    /// history a burst would otherwise evict.
+    pub fn count_sent(&mut self, wire: &Wire) {
+        self.stats.record(Direction::Sent, &wire.command(), wire.raw.len());
+    }
+
     /// Look up a ring entry by sequence number.
     pub fn get(&self, seq: u64) -> Option<&RingEntry> {
         self.ring.iter().find(|e| e.seq == seq)
@@ -129,5 +138,39 @@ impl SessionView {
     /// Whether a peer is currently connected.
     pub fn is_connected(&self) -> bool {
         self.peer.addr.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::transport::FrameKind;
+
+    fn wire(command: &str, len: usize) -> Wire {
+        Wire {
+            msg: None,
+            frame: FrameKind::V1 {
+                magic: [0; 4],
+                command: command.to_string(),
+                len: len as u32,
+                checksum_ok: true,
+            },
+            raw: vec![0; len],
+            decode_error: None,
+        }
+    }
+
+    #[test]
+    fn count_sent_updates_the_stats_but_not_the_ring() {
+        let mut v = SessionView::new();
+        let at = Instant::now();
+        v.record(0, Direction::Sent, &wire("ping", 32), at);
+        for _ in 0..10 {
+            v.count_sent(&wire("ping", 32));
+        }
+        assert_eq!(v.stats.msgs_out, 11);
+        assert_eq!(v.stats.bytes_out, 32 * 11);
+        assert_eq!(v.stats.per_msg_out["ping"], 11);
+        assert_eq!(v.ring.len(), 1, "only the recorded send enters the ring");
     }
 }
